@@ -191,19 +191,7 @@ print(json.dumps(issues[:20]))  # cap at 20
       if [[ "$ALL_PASSED" == "True" ]]; then
         echo "✅ All gates passed — loop complete" >&2
         # Clear resume_point in STATE.md
-        python3 -c "
-import sys, json, re
-from pathlib import Path
-sf = Path('$BASE_DIR/STATE.md')
-c = sf.read_text() if sf.exists() else ''
-m = re.search(r'```json\s*(\{.*?\})\s*```', c, re.DOTALL)
-if m:
-    state = json.loads(m.group(1))
-    state['resume_point'] = None
-    j = json.dumps(state, ensure_ascii=False, indent=2)
-    c = re.sub(r'```json\s*\{.*?\}\s*```', '```json\n' + j + '\n```', c, flags=re.DOTALL)
-    sf.write_text(c)
-" 2>/dev/null || true
+        python3 "$BASE_DIR/bin/clear-resume.py" "$BASE_DIR" 2>/dev/null || true
         exit 0
       fi
 
@@ -231,21 +219,7 @@ print(json.dumps({'status':'iterate','resume_point':resume,'failed_gate':failed,
       echo "→ [ITERATE] Resume from: $RESUME_POINT" >&2
 
       # Persist resume_point to STATE.md so loop can resume after crash
-      python3 -c "
-import sys, json, re
-from pathlib import Path
-sf = Path('$BASE_DIR/STATE.md')
-c = sf.read_text() if sf.exists() else ''
-m = re.search(r'```json\s*(\{.*?\})\s*```', c, re.DOTALL)
-state = json.loads(m.group(1)) if m else {'phase_results':{},'current_goal':'','resume_point':None}
-state['resume_point'] = '$RESUME_POINT'
-j = json.dumps(state, ensure_ascii=False, indent=2)
-if m:
-    c = re.sub(r'```json\s*\{.*?\}\s*```', '```json\n' + j + '\n```', c, flags=re.DOTALL)
-else:
-    c = c.rstrip() + '\n\n```json\n' + j + '\n```\n'
-sf.write_text(c)
-" 2>/dev/null || true
+      python3 "$BASE_DIR/bin/persist-resume.py" "$BASE_DIR" "$RESUME_POINT" 2>/dev/null || true
       echo "" >&2
 
     done
