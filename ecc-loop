@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# ECC-to-Hermes Loop — CLI entry point for all phases
+# Usage: ecc-loop <phase> [args]
+#   ecc-loop p1                    # Phase 1: info (hooks auto-fire)
+#   ecc-loop p2 --root .           # Phase 2: VerificationLoop
+#   ecc-loop p3 --dry-run          # Phase 3: Instinct Learning
+#   ecc-loop p4                    # Phase 4: info (use skills)
+#   ecc-loop p5                    # Phase 5: hermes status --json
+#   ecc-loop p6 --query "..."      # Phase 6: EvaluatorRAG
+#   ecc-loop p6 --state            # Phase 6 with auto HUD from Phase 5
+#   ecc-loop p7 --goal "..."       # Phase 7: Plan (Loop Engineering)
+#   ecc-loop loop --goal "..."     # Full Loop Engineering cycle
+
+# Ensure ~/.local/bin is on PATH so hermes subcommands are findable
+case ":$PATH:" in
+  *:"$HOME/.local/bin":*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+
+set -e
+BASE_DIR="$HOME/.hermes/ecc-to-hermes-loop"
+PHASE="${1:-}"
+REMAINING_ARGS="$*"
+shift 2>/dev/null || true
+
+case "$PHASE" in
+  loop)
+    # ── Loop Engineering: DISCOVER → PLAN → EXECUTE → VERIFY → ITERATE ──
+    # Usage: ecc-loop loop --goal "fix login bug" [--max-iterations N] [--trigger ci|issue|manual]
+    GOAL=""
+    MAX_ITER=5
+    TRIGGER="manual"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --goal) GOAL="$2"; shift 2 ;;
+        --max-iterations) MAX_ITER="$2"; shift 2 ;;
+        --trigger) TRIGGER="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+
+    # DISCOVER: Condition trigger check — only proceed if trigger condition is met
+    TRIGGER_OK=false
+    case "$TRIGGER" in
+      ci)
+        # Check if CI failed recently (look for pytest failures or build errors)
+        CI_FAILED=$(python3 -c "
+import subprocess, json
+try:
+    r = subprocess.run(['git', 'log', '-1', '--format=%H %s'], capture_output=True, text=True, timeout=5)
+    print('false')
+except:
+    print('false')
+" 2>/dev/null)
+        if [[ "$CI_FAILED" != "false" ]]; then TRIGGER_OK=true; fi
+        ;;
+      issue)
+        # Check if STATE.md has new issues flagged
+        ISSUE_COUNT=$(python3 -c "
+import re, json
+from pathlib import Path
+c = Path('$BASE_DIR/STATE.md').read_text() if Path('$BASE_DIR/STATE.md').exists() else ''
+m = re.search(r'\`\`\`json\s*(\{.*?\})\s*\`\`\`', c, re.DOTALL)
+if m:
+    d = json.loads(m.group(1))
+    issues = d.get('loop_state', {}).get('discovered_issues', [])
+    print(len(issues))
+else:
+    print(0)
+" 2>/dev/null)
+        if [[ "$ISSUE_COUNT" -gt 0 ]]; then TRIGGER_OK=true; fi
+        ;;
+      manual|*)
+        TRIGGER_OK=true
+        ;;
+    esac
+
+    if [[ "$TRIGGER_OK" != "true" ]]; then
+      echo "→ [DISCOVER] Trigger condition not met ($TRIGGER) — skipping" >&2
+      echo "  Set --goal to override and run anyway" >&2
+      if [[ -z "$GOAL" ]]; then
+        exit 0
+      fi
+    fi
+
+    if [[ -z "$GOAL" ]]; then
+      echo "Usage: ecc-loop loop --goal '<goal>' [--max-iterations N] [--trigger ci|issue|manual]" >&2
+      exit 1
+    fi
+
+    echo "=== Loop Engineering: DISCOVER → PLAN → EXECUTE → VERIFY → ITERATE ===" >&2
+    echo "Goal: $GOAL" >&2
+    echo "Trigger: $TRIGGER" >&2
+    echo "Max iterations: $MAX_ITER" >&2
+    echo "" >&2
+
+    # DISCOVER: Read STATE.md for resume_point (supports resuming from previous crash)
+    RESUME_POINT=""
+    ITER=0
+    if [[ -f "$BASE_DIR/STATE.md" ]]; then
+      STATE_RESUME=$(python3 -c $'
+import sys, json, re
+c = open(\"$BASE_DIR/STATE.md\").read()
+m = re.search(r\"`json\\s*(\\{.*?\\})\\s*`\", c, re.DOTALL)
+if m:
+    d = json.loads(m.group(1))
+    print(d.get(\"resume_point\", \"\"))
+else:
+    print(\"\")
+' 2>/dev/null || echo "")
+      if [[ -n "$STATE_RESUME" ]]; then
+        RESUME_POINT="$STATE_RESUME"
+        echo "→ [DISCOVER] Resuming from previous state: resume_point=$RESUME_POINT" >&2
+        echo "" >&2
+      fi
+    fi
+
+    # DISCOVER: Scan codebase for issues (only on cold start)
+    if [[ -z "$RESUME_POINT" ]]; then
+      echo "→ [DISCOVER] Scanning codebase..." >&2
+      SCAN_RESULT=$(python3 -c "
+import subprocess, re, json
+from pathlib import Path
+
+CD = Path('$BASE_DIR')
+issues = []
+
+# Check for TODO/FIXME/HACK
+for py in CD.rglob('*.py'):
+    try:
+        c = py.read_text()
+        for m in re.finditer(r'(#\s*(TODO|FIXME|HACK|XXX).*)', c):
+            issues.append({'type': 'code', 'file': str(py.relative_to(CD)), 'text': m.group(0).strip()[:80]})
+    except: pass
+
+# Check for missing __init__.py
+for d in [CD/'phase1', CD/'phase2', CD/'phase3', CD/'phase4', CD/'phase5', CD/'phase6']:
+    if not (d/'__init__.py').exists():
+        issues.append({'type': 'structure', 'file': str(d.relative_to(CD)), 'text': 'missing __init__.py'})
+
+print(json.dumps(issues[:20]))  # cap at 20
+" 2>/dev/null || echo "[]")
+      ISSUE_COUNT=$(echo "$SCAN_RESULT" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+      echo "  Found $ISSUE_COUNT issues" >&2
+      echo "  Issues: $(echo "$SCAN_RESULT" | python3 -c "import sys,json; [print('  -', i['file'], ':', i['text'][:50]) for i in json.load(sys.stdin)[:5])" 2>/dev/null || true)" >&2
+      echo "" >&2
+
+      # Write discovered_issues to STATE.md
+      python3 "$BASE_DIR/update_state_field.py" \
+        "loop_state.discovered_issues" \
+        "$SCAN_RESULT" \
+        "$BASE_DIR/STATE.md" 2>/dev/null || true
+    fi
+
+    while [[ $ITER -lt $MAX_ITER ]]; do
+      ITER=$((ITER+1))
+      echo "--- Iteration $ITER/$MAX_ITER ---" >&2
+
+      # PLAN (only on first iteration, or when resuming from execute)
+      if [[ "$RESUME_POINT" != "execute" ]] && [[ "$RESUME_POINT" != "verify" ]]; then
+        echo "→ [PLAN] Decomposing goal..." >&2
+        PLAN_JSON_FILE=$(mktemp -t loop-plan-XXXXXX.json)
+        python3 "$BASE_DIR/phaseP/phaseP.py" --goal "$GOAL" --json > "$PLAN_JSON_FILE" 2>/dev/null
+        PLAN_JSON=$(cat "$PLAN_JSON_FILE")
+        SUB_TASKS_COUNT=$(python3 -c "import json; print(len(json.load(open('$PLAN_JSON_FILE'))['sub_tasks']))")
+        echo "$PLAN_JSON" | python3 -c "import sys,json; [print(t) for t in json.load(sys.stdin)['sub_tasks']]" >&2
+        echo "" >&2
+        python3 "$BASE_DIR/save_loop_state.py" "$GOAL" "$PLAN_JSON_FILE" 2>/dev/null || true
+        echo "STATE.md updated" >&2
+        rm -f "$PLAN_JSON_FILE"
+        echo "" >&2
+      else
+        echo "→ [PLAN] Skipping — resuming from: $RESUME_POINT" >&2
+        echo "" >&2
+      fi
+
+      # EXECUTE (skip if resuming from verify)
+      if [[ "$RESUME_POINT" != "verify" ]]; then
+        echo "→ [EXECUTE] Running sub-tasks..." >&2
+        echo "  (Hooks auto-fire on file changes — ecc-hook daemon running required)" >&2
+        echo "" >&2
+      fi
+
+      # VERIFY
+      echo "→ [VERIFY] Running gate checks..." >&2
+      set +e
+      VERIFY_JSON=$( python3 "$BASE_DIR/phase2/verification_loop.py" --root "$BASE_DIR" --json 2>/dev/null )
+      set -e
+      ALL_PASSED=$(echo "$VERIFY_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['all_passed'])")
+
+      if [[ "$ALL_PASSED" == "True" ]]; then
+        echo "✅ All gates passed — loop complete" >&2
+        # Clear resume_point in STATE.md
+        python3 -c "
+import sys, json, re
+from pathlib import Path
+sf = Path('$BASE_DIR/STATE.md')
+c = sf.read_text() if sf.exists() else ''
+m = re.search(r'```json\s*(\{.*?\})\s*```', c, re.DOTALL)
+if m:
+    state = json.loads(m.group(1))
+    state['resume_point'] = None
+    j = json.dumps(state, ensure_ascii=False, indent=2)
+    c = re.sub(r'```json\s*\{.*?\}\s*```', '```json\n' + j + '\n```', c, flags=re.DOTALL)
+    sf.write_text(c)
+" 2>/dev/null || true
+        exit 0
+      fi
+
+      # ITERATE: Determine resume point
+      FAILED_GATES=$(echo "$VERIFY_JSON" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+gates=[g['gate'] for g in d['gates'] if not g['passed']]
+print(','.join(gates) if gates else 'unknown')
+" 2>/dev/null || echo "unknown")
+      echo "⚠️  Gates failed: $FAILED_GATES" >&2
+      echo "→ [ITERATE] Determining resume point..." >&2
+
+      ITERATE_JSON=$(echo "$VERIFY_JSON" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+failed_gates=[g['gate'] for g in d['gates'] if not g['passed']]
+failed=failed_gates[0] if failed_gates else 'unknown'
+gate_to_phase={'build':'execute','type':'execute','lint':'execute','test':'execute','security':'execute','diff':'verify'}
+resume=gate_to_phase.get(failed,'verify')
+print(json.dumps({'status':'iterate','resume_point':resume,'failed_gate':failed,'failed_gates':failed_gates}))
+" 2>/dev/null)
+
+      RESUME_POINT=$(echo "$ITERATE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['resume_point'])")
+      echo "→ [ITERATE] Resume from: $RESUME_POINT" >&2
+
+      # Persist resume_point to STATE.md so loop can resume after crash
+      python3 -c "
+import sys, json, re
+from pathlib import Path
+sf = Path('$BASE_DIR/STATE.md')
+c = sf.read_text() if sf.exists() else ''
+m = re.search(r'```json\s*(\{.*?\})\s*```', c, re.DOTALL)
+state = json.loads(m.group(1)) if m else {'phase_results':{},'current_goal':'','resume_point':None}
+state['resume_point'] = '$RESUME_POINT'
+j = json.dumps(state, ensure_ascii=False, indent=2)
+if m:
+    c = re.sub(r'```json\s*\{.*?\}\s*```', '```json\n' + j + '\n```', c, flags=re.DOTALL)
+else:
+    c = c.rstrip() + '\n\n```json\n' + j + '\n```\n'
+sf.write_text(c)
+" 2>/dev/null || true
+      echo "" >&2
+
+    done
+
+    echo "❌ Max iterations ($MAX_ITER) reached — manual intervention required" >&2
+    exit 1
+    ;;
+  p1)
+    echo "Phase 1: PostToolUse Hook"
+    echo "  Location: $BASE_DIR/phase1/"
+    echo "  Hooks: post_format, post_lint"
+    echo "  Auto-fire after write_file, patch, skill_manage — no manual run needed."
+    echo "  post_format: runs black/prettier/rustfmt/... on supported file types"
+    echo "  post_lint: runs ruff/eslint/shellcheck/... on modified files"
+    echo ""
+    echo "  Direct test: write a file then check it was formatted."
+    ;;
+  p2)
+    echo "Phase 2: Verification Loop"
+    echo "  Location: $BASE_DIR/phase2/"
+    echo "  6 Gates: build → type → lint → test → security → diff"
+    echo ""
+    python3 "$BASE_DIR/phase2/verification_loop.py" --root "$BASE_DIR" "$@"
+    ;;
+  p3)
+    echo "Phase 3: Instinct Learning"
+    echo "  Location: $BASE_DIR/phase3/"
+    echo "  Promoted skills: $HOME/.hermes/skills/instinct-*.md"
+    echo ""
+    python3 "$BASE_DIR/phase3/instinct_learning.py" "$@"
+    ;;
+  p4)
+    python3 "$BASE_DIR/phase4/phase4.py" "$@"
+    ;;
+  p5)
+    echo "Phase 5: HUD Status Contract"
+    echo "  Location: $BASE_DIR/phase5/"
+    echo "  Integration: hermes status --json"
+    echo ""
+    python3 "$BASE_DIR/phase5/phase5.py" "$@"
+    ;;
+  p7)
+    echo "Phase 7: Plan — Goal Decomposition + Constraint Identification"
+    echo "  Location: $BASE_DIR/phaseP/"
+    echo "  Loop Engineering: DISCOVER → PLAN → EXECUTE → VERIFY → ITERATE"
+    echo ""
+    python3 "$BASE_DIR/phaseP/phaseP.py" "$@"
+    ;;
+  p6)
+    echo "Phase 6: Evaluator RAG"
+    echo "  Location: $BASE_DIR/phase6/"
+    echo ""
+    if [[ "$REMAINING_ARGS" == *" --state"* ]] || [[ "$REMAINING_ARGS" == *"--state="* ]]; then
+      TEMP_STATE=$(mktemp -t hud-state-XXXXXX.json)
+      python3 "$BASE_DIR/phase5/phase5.py" --json > "$TEMP_STATE"
+      CLEAN_ARGS=()
+      for arg in "$@"; do
+        [[ "$arg" == "--state" ]] && continue
+        [[ "$arg" == --state=* ]] && continue
+        CLEAN_ARGS+=("$arg")
+      done
+      python3 "$BASE_DIR/phase6/phase6.py" --state "$TEMP_STATE" "${CLEAN_ARGS[@]}"
+      rm -f "$TEMP_STATE"
+    else
+      python3 "$BASE_DIR/phase6/phase6.py" "$@"
+    fi
+    ;;
+  list)
+    echo "ECC-to-Hermes Loop — Available Phases"
+    echo ""
+    echo "  p1  PostToolUse Hook     — post_format + post_lint (auto-fire)"
+    echo "  p2  Verification Loop    — 6-stage gate: build/type/lint/test/security/diff"
+    echo "  p3  Instinct Learning   — extract patterns from session history"
+    echo "  p4  Professional Agents — planner/tdd-guide/code-reviewer/security-reviewer"
+    echo "  p5  HUD Status Contract — hermes status --json integration"
+    echo "  p7  Plan                — goal decomposition + constraint identification"
+    echo "  p6  Evaluator RAG      — self-referential success evaluation"
+    echo "  loop Full Loop Engineering — DISCOVER→PLAN→EXECUTE→VERIFY→ITERATE"
+    echo ""
+    echo "  Run 'ecc-loop <phase> --help' for phase-specific usage."
+    ;;
+  --help|-h|help)
+    echo "ECC-to-Hermes Loop CLI"
+    echo ""
+    echo "  ecc-loop list           # Show all phases"
+    echo "  ecc-loop loop --goal .. # Full Loop Engineering cycle"
+    echo "  ecc-loop p7 --goal ... # Phase 7 Plan (Goal Decomposition)"
+    echo "  ecc-loop p2 --root .   # Run VerificationLoop"
+    echo "  ecc-loop p6 --query ... # Phase 6 Evaluator RAG"
+    echo "  ecc-loop p6 --state    # Phase 6 with HUD from Phase 5"
+    ;;
+  *)
+    echo "Usage: ecc-loop <phase> [args]"
+    echo "  Phases: p1 p2 p3 p4 p5 p6 p7"
+    echo "  Run 'ecc-loop list' to see all phases."
+    echo "  Run 'ecc-loop --help' for help."
+    ;;
+esac

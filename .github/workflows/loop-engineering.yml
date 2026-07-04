@@ -1,0 +1,158 @@
+name: ECC-to-Hermes Loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      goal:
+        description: 'Goal'
+        required: false
+        type: string
+        default: ''
+      trigger:
+        description: 'Trigger type'
+        required: false
+        type: choice
+        default: 'manual'
+        options: [manual, ci, issue, daily]
+      max_iterations:
+        description: 'Max iterations'
+        required: false
+        type: string
+        default: '3'
+
+  repository_dispatch:
+    types: [ci-failed, issue-created, daily-trigger]
+
+  schedule:
+    - cron: '0 9 * * 1-5'
+
+env:
+  PYTHON_VER: '3.11'
+
+jobs:
+  loop-engineering:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: write
+      repository-projects: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VER }}
+
+      - name: Install ecc-to-hermes-loop
+        run: |
+          set -e
+          BASE="$HOME/.hermes/ecc-to-hermes-loop"
+          mkdir -p "$BASE"
+          cp -r . "$BASE/"
+          chmod +x "$BASE/ecc-loop"
+          pip install pytest --quiet
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$BASE/ecc-loop" "$HOME/.local/bin/ecc-loop"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Determine loop goal and trigger
+        id: goal
+        run: |
+          set -e
+          python3 "$HOME/.hermes/ecc-to-hermes-loop/.github/determine-goal.py" \
+            --event-name "${{ github.event_name }}" \
+            --event-action "${{ github.event.action }}" \
+            --workflow-goal "${{ inputs.goal }}" \
+            --workflow-trigger "${{ inputs.trigger }}" \
+            --workflow-max-iterations "${{ inputs.max_iterations }}" \
+            --branch "${{ github.ref_name }}" \
+            --ci-goal "${{ github.event.client_payload.goal || '' }}" \
+            --issue-number "${{ github.event.client_payload.issue_number || '' }}" \
+            --issue-title "${{ github.event.client_payload.issue_title || '' }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --github-run-id "${{ github.run_id }}"
+          echo "goal=$(cat /tmp/loop_goal.txt)" >> $GITHUB_OUTPUT
+          echo "trigger=$(cat /tmp/loop_trigger.txt)" >> $GITHUB_OUTPUT
+          echo "max_iterations=$(cat /tmp/loop_max_iter.txt)" >> $GITHUB_OUTPUT
+          echo "run_url=$(cat /tmp/loop_run_url.txt)" >> $GITHUB_OUTPUT
+
+      - name: Write initial loop state
+        env:
+          LOOP_GOAL: ${{ steps.goal.outputs.goal }}
+          LOOP_TRIGGER: ${{ steps.goal.outputs.trigger }}
+          RUN_URL: ${{ steps.goal.outputs.run_url }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -e
+          python3 "$HOME/.hermes/ecc-to-hermes-loop/.github/setup-loop-state.py" \
+            "$LOOP_GOAL" "$LOOP_TRIGGER" "$RUN_URL"
+
+      - name: Run Loop Engineering
+        id: loop
+        env:
+          LOOP_GOAL: ${{ steps.goal.outputs.goal }}
+          LOOP_TRIGGER: ${{ steps.goal.outputs.trigger }}
+          LOOP_MAX_ITER: ${{ steps.goal.outputs.max_iterations }}
+        run: |
+          set -e
+          cd $HOME/.hermes/ecc-to-hermes-loop
+          ecc-loop loop \
+            --goal "$LOOP_GOAL" \
+            --trigger "$LOOP_TRIGGER" \
+            --max-iterations "$LOOP_MAX_ITER" \
+            2>&1 | tee loop-output.log
+
+      - name: Parse loop results
+        id: results
+        run: |
+          set -e
+          python3 "$HOME/.hermes/ecc-to-hermes-loop/.github/parse-results.py" \
+            --log-file loop-output.log \
+            --status-file /tmp/loop_status.txt \
+            --iterations-file /tmp/loop_iterations.txt
+          echo "status=$(cat /tmp/loop_status.txt)" >> $GITHUB_OUTPUT
+          echo "iterations=$(cat /tmp/loop_iterations.txt)" >> $GITHUB_OUTPUT
+
+      - name: Create PR on success
+        if: steps.results.outputs.status == 'SUCCESS' && github.event_name != 'schedule'
+        env:
+          LOOP_GOAL: ${{ steps.goal.outputs.goal }}
+          LOOP_TRIGGER: ${{ steps.goal.outputs.trigger }}
+          LOOP_ITERATIONS: ${{ steps.results.outputs.iterations }}
+          RUN_URL: ${{ steps.goal.outputs.run_url }}
+        run: |
+          set -e
+          python3 "$HOME/.hermes/ecc-to-hermes-loop/.github/create-pr.py" \
+            "Loop Engineering: $LOOP_GOAL"
+
+      - name: Open issue on failure
+        if: steps.results.outputs.status != 'SUCCESS'
+        env:
+          LOOP_GOAL: ${{ steps.goal.outputs.goal }}
+          LOOP_TRIGGER: ${{ steps.goal.outputs.trigger }}
+          LOOP_ITERATIONS: ${{ steps.results.outputs.iterations }}
+          RUN_URL: ${{ steps.goal.outputs.run_url }}
+          LOOP_STATUS: ${{ steps.results.outputs.status }}
+        run: |
+          set -e
+          python3 "$HOME/.hermes/ecc-to-hermes-loop/.github/create-issue.py" \
+            "[Loop] $LOOP_GOAL"
+
+      - name: Update loop state on completion
+        if: always()
+        env:
+          LOOP_STATUS: ${{ steps.results.outputs.status }}
+          RUN_URL: ${{ steps.goal.outputs.run_url }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -e
+          python3 "$HOME/.hermes/ecc-to-hermes-loop/.github/update-loop-state.py"

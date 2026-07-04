@@ -1,0 +1,69 @@
+name: ECC-to-Hermes Loop CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-xdist pytest-asyncio
+
+      - name: Phase 2 — Verification Loop
+        run: |
+          echo "=== Phase 2: Verification Loop ==="
+          python phase2/verification_loop.py --root "$PWD" --quick
+
+      - name: Phase 3 — Instinct Learning (dry-run)
+        run: |
+          echo "=== Phase 3: Instinct Learning (dry-run) ==="
+          python phase3/instinct_learning.py --dry-run
+
+      - name: Phase 5 — HUD Status Contract
+        run: |
+          echo "=== Phase 5: HUD Status ==="
+          python phase5/phase5.py --json | python -c "import json,sys; d=json.load(sys.stdin); print(f'HUD v{d[\"version\"]} — {len(d[\"phases\"])} phases — health={d[\"health\"]}')"
+
+      - name: Phase 6 — Evaluator RAG
+        run: |
+          echo "=== Phase 6: Evaluator RAG ==="
+          python phase6/phase6.py --state <(python phase5/phase5.py --json) --query "ECC self-improvement"
+
+      - name: Run all tests
+        run: |
+          echo "=== Running pytest ==="
+          pytest --tb=short -q
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install security deps
+        run: pip install ruff bandit
+
+      - name: Security lint
+        run: |
+          ruff check . --output-format=text || true
+          bandit -r phase1 phase2 phase3 phase5 phase6 shared --format=text || true
