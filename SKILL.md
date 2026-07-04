@@ -1,18 +1,29 @@
 # ECC-to-Hermes Loop SKILL
 
-## 状态：全部完成 ✅
+## 状态：Loop Engineering 架构已升级 ✅
 
-Phase 1-6 全部实现并通过测试。
+基于 Loop Engineering 完全指南 v1.0 六大组件重构。
 
 ---
 
-## 当前维护模式
+## 六大组件状态
 
-进入维护模式，只做自改进（self-improvement loop）：
+| 组件 | 状态 | 位置 |
+|------|------|------|
+| Automations | ✅ Cron/GHA | `.github/workflows/loop-engineering.yml` |
+| Worktrees | ✅ bin/worktree-manager.py | 每 agent 独立目录 |
+| Skills | ✅ SKILL.md 渐进式 | `phase4/agents/*/SKILL.md` |
+| MCP Connectors | ✅ .github/mcp/ | github.py, filesystem |
+| Sub-agents | ✅ phase4/agent_registry | 制造者≠审查者分离 |
+| Memory | ✅ AGENTS.md, STATE.md | 跨会话持久化 |
+
+---
+
+## 自改进协议
 
 ### 每次激活时
-1. 运行 `bin/ci-local.sh` 确认 CI 全部通过
-2. 运行 `/Library/Frameworks/Python.framework/Versions/3.11/bin/python3 -m pytest --tb=short -q` 确认全部 166 tests 通过
+1. `bin/ci-local.sh` — CI 全部通过
+2. `pytest -q` — 全部 tests 通过
 3. 发现问题直接修复，不攒
 
 ### 自改进扫描方向
@@ -46,15 +57,20 @@ Phase 1-6 全部实现并通过测试。
 ~/.hermes/ecc-to-hermes-loop/bin/ci-local.sh
 
 # 全量测试
-cd ~/.hermes/ecc-to-hermes-loop && /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 -m pytest --tb=short -q
+cd ~/.hermes/ecc-to-hermes-loop && pytest -q
 
-# 单 phase 测试
-python3 -m pytest phase4/test_phase4_e2e.py -v
+# MCP GitHub connector
+python3 .github/mcp/github.py issues
+python3 .github/mcp/github.py runs
 
-# 运行特定 phase
+# Worktree 管理
+python3 bin/worktree-manager.py list
+python3 bin/worktree-manager.py create reviewer --purpose "code review"
+python3 bin/worktree-manager.py remove reviewer
+
+# Agent 子代理
 ecc-loop p4 --list
-ecc-loop p5 --json
-ecc-loop p6 --query "ECC self-improvement"
+ecc-loop p4 --task "review code in phase2/gates/" --execute
 ```
 
 ---
@@ -63,16 +79,22 @@ ecc-loop p6 --query "ECC self-improvement"
 
 ```
 ecc-to-hermes-loop/
-├── ecc-loop              # CLI 入口
-├── bin/ci-local.sh      # 本地 CI
+├── ecc-loop                  # CLI 入口
+├── AGENTS.md                # Memory: 跨会话状态
+├── STATE.md                 # Loop 状态（GitHub Actions 用）
+├── bin/
+│   ├── ci-local.sh         # 本地 CI
+│   ├── worktree-manager.py  # Agent 隔离工作树
+│   ├── clear-resume.py     # 清除 resume_point
+│   └── persist-resume.py   # 持久化 resume_point
+├── .github/
+│   ├── mcp/
+│   │   └── github.py       # GitHub MCP 连接器
+│   └── workflows/
+│       └── loop-engineering.yml  # GitHub Actions 自动循环
 ├── shared/
-│   ├── paths.py         # HERMES_HOME, STATE_DB, SKILLS_DIR
-│   ├── session_db.py    # get_db()（phase3/5 共用）
-│   └── tool_sequence.py # 工具序列提取（phase3/6 共用）
-├── phase1/  # PostToolUse Hook
-├── phase2/  # Verification Loop
-├── phase3/  # Instinct Learning
-├── phase4/  # Professional Agents
-├── phase5/  # HUD Status
-└── phase6/  # Evaluator RAG
+│   ├── paths.py
+│   ├── session_db.py
+│   └── tool_sequence.py
+└── phase1-6/
 ```
