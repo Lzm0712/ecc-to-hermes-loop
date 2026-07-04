@@ -26,7 +26,7 @@ jobs:
       - name: Phase 2 — Verification Loop
         run: |
           echo "=== Phase 2: Verification Loop ==="
-          python phase2/verification_loop.py --root "$PWD" --quick
+          python phase2/verification_loop.py --root "$PWD"
 
       - name: Phase 3 — Instinct Learning (dry-run)
         run: |
